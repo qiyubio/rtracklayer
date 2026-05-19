@@ -246,6 +246,27 @@ normTableQueryRange <- function(range, genome, max.length = 1000L) {
   normGenomeRange(range, seqinfo, max.length)
 }
 
+ucscJSONQuery <- function(base_url, path, query = list()) {
+  verbose <- getOption("rtracklayer.http.verbose", FALSE)
+  verbose <- as.integer(isTRUE(as.logical(verbose)))
+  endpoint <- paste0(sub("/+$", "", base_url), "/",
+                     sub("^/+", "", path))
+  response <- GET(endpoint, user_agent("rtracklayer"),
+                  config(verbose = verbose),
+                  query = Filter(Negate(is.null), as.list(query)))
+  status <- response[["status_code"]]
+  if (status >= 300L) {
+    details <- tryCatch(content(response, as = "text", encoding = "UTF-8"),
+                        error = function(...) "")
+    msg <- paste0("UCSC request failed [", status, "]")
+    if (nzchar(details))
+      msg <- paste0(msg, ": ", details)
+    stop(msg)
+  }
+  content(response, as = "parsed", type = "application/json",
+          encoding = "UTF-8")
+}
+
 ucscTables <- function(genome, track) {
     .Defunct("tableNames",
              msg = paste("Query UCSC data using the table identifier,",
@@ -313,9 +334,9 @@ tableExists <- function(query, name) {
   if (isTrackHub(query))
     return(name %in% tableNames(query))
 
-  url <- RestUri(paste0(query@url, "hubApi"))
   response <- tryCatch(
-    read(url$list$schema, genome = query@genome, track = name),
+    ucscJSONQuery(query@url, "hubApi/list/schema",
+                  query = list(genome = query@genome, track = name)),
     error = function(...) NULL
   )
   !is.null(response$columnTypes)
@@ -361,15 +382,22 @@ setMethod("tableNames", "UCSCTableQuery",
               th <- TrackHub(object@hubUrl)
               names(th[[genome]])
             } else {
-              url <- RestUri(paste0(object@url, "hubApi"))
-              response <- read(url$list$tracks, genome = genome, trackLeavesOnly = 1)
-              names <- names(response[[genome]])
-              tables <- mapply(function(name, response) {
-                                   if (!is.null(response$protectedData)) NULL
-                                   else if (!is.null(response$table)) response$table
-                                   else name
-                          }, names, response[[genome]])
-              Filter(Negate(is.null), tables)
+              response <- ucscJSONQuery(object@url, "hubApi/list/tracks",
+                                        query = list(genome = genome,
+                                                     trackLeavesOnly = 1))
+              genomeTracks <- response[[genome]]
+              if (is.null(genomeTracks))
+                return(character())
+              trackNames <- names(genomeTracks)
+              tables <- vapply(trackNames, function(name) {
+                                   track <- genomeTracks[[name]]
+                                   if (!is.null(track$protectedData))
+                                     return(NA_character_)
+                                   if (!is.null(track$table))
+                                     return(track$table)
+                                   name
+                               }, character(1), USE.NAMES = FALSE)
+              tables[!is.na(tables)]
             }
           })
 
@@ -398,8 +426,8 @@ setMethod("ucscSchema", "UCSCTableQuery", function(object) {
   genome <- object@genome
   tableName <- tableName(object)
   stopifnot(isSingleString(tableName))
-  url <- RestUri(paste0(object@url, "hubApi"))
-  response <- read(url$list$schema, genome = genome, track = tableName)
+  response <- ucscJSONQuery(object@url, "hubApi/list/schema",
+                            query = list(genome = genome, track = tableName))
   rowCount <- as.integer(response[["itemCount"]])
   if (length(rowCount) == 0L)
     rowCount <- NA_integer_
@@ -496,9 +524,8 @@ setMethod("track", "UCSCTableQuery",
 parseResponse <- function(response, tableName, chrom) {
   results <- response[[tableName]]
   if (is.null(results)) {
-    return(as.data.frame(do.call(rbind, response[[chrom]])))
-  }
-  if (is.null(names(results))) {
+    df <- as.data.frame(do.call(rbind, response[[chrom]]))
+  } else if (is.null(names(results))) {
     df <- do.call(rbind.data.frame, results)
   } else {
     chromosomes <- names(results)
@@ -507,6 +534,8 @@ parseResponse <- function(response, tableName, chrom) {
     })
     df <- do.call(rbind, listOfDf)
   }
+  isIntegerCol <- vapply(df, is.integer, logical(1))
+  df[isIntegerCol] <- lapply(df[isIntegerCol], as.numeric)
   rownames(df) <- NULL
   df
 }
@@ -537,8 +566,8 @@ setMethod("getTable", "UCSCTableQuery",
                } else track <- track(thg, tableName)
                as.data.frame(track)
             } else {
-              url <- RestUri(paste0(object@url, "hubApi"))
-              response <- read(url$getData$track, query)
+              response <- ucscJSONQuery(object@url, "hubApi/getData/track",
+                                        query = query)
               seqnames <- as.character(seqnames(object@range))
               output <- parseResponse(response, tableName, seqnames)
               NAMES <- names(object)
@@ -1431,9 +1460,9 @@ setMethod("ucscTrackModes", "ucscTracks",
 ucscGenomes <- function(organism=FALSE) {
   stopifnot(isTRUEorFALSE(organism))
   names <- c("db", "species", "date", "name", "organism")
-  url <- RestUri("https://api.genome.ucsc.edu/")
-  response <- read(url$list$ucscGenomes)
-  genomes <- response[[5]]
+  response <- ucscJSONQuery("https://api.genome.ucsc.edu",
+                            "list/ucscGenomes")
+  genomes <- response[["ucscGenomes"]]
   genomeNames <- names(genomes)
   listOfDf <- Map(function(name, x) {
     date <- sub("\\s*\\([^\\)]+\\)", "", x$description)
