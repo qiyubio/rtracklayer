@@ -1,4 +1,4 @@
-This is a pacthed verison (uscs.R is updated) for rtracklayer on Biowulf compute node.
+This is a pacthed verison (uscs.R is updated) for rtracklayer on Biowulf compute node. The RestUri are not working well with proxy, replacing it with `httr`. There is a patch file rtracklayer-ucsc-json-compat.patch.
 
 The default version will fail the test:
 ```
